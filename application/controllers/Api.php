@@ -1,0 +1,1146 @@
+<?php
+defined("BASEPATH") or exit("No direct script access allowed");
+
+class Api extends CI_Controller
+{
+    public function __construct()
+    {
+        parent::__construct();
+        $this->load->model("User_model");
+        $this->load->model("Match_model");
+        $this->load->model("Prediction_model");
+        $this->load->model("Promo_model", "promo");
+        $this->load->library("form_validation");
+        $this->load->model('Settings_model'); // TAMBAH INI
+    }
+
+    // ==================== AUTHENTICATION APIs ====================
+
+    /**
+     * Register new user
+     * POST /api/register
+     */
+    public function register()
+    {
+        header('Content-Type: application/json');
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        log_message("DEBUG", '[REGISTER] Raw input: ' . print_r($input, true));
+
+        $errors = [];
+
+        // ==========================
+        // Validasi username
+        // ==========================
+        if (!isset($input['username']) || empty(trim($input['username']))) {
+            $errors[] = 'Username is required';
+        } else {
+            $username = trim($input['username']);
+            $this->db->where('username', $username);
+            if ($this->db->count_all_results('users') > 0) {
+                $errors[] = 'Username already exists';
+            }
+        }
+
+        // ==========================
+        // Validasi email
+        // ==========================
+        if (!isset($input['email']) || empty(trim($input['email']))) {
+            $errors[] = 'Email is required';
+        } else if (!filter_var($input['email'], FILTER_VALIDATE_EMAIL)) {
+            $errors[] = 'Email is not valid';
+        } else {
+            $email = trim($input['email']);
+            $this->db->where('email', $email);
+            if ($this->db->count_all_results('users') > 0) {
+                $errors[] = 'Email already exists';
+            }
+        }
+
+        // ==========================
+        // Validasi nomor handphone
+        // ==========================
+        if (!isset($input['phone']) || empty(trim($input['phone']))) {
+            $errors[] = 'Phone number is required';
+        } else {
+            // Normalisasi sederhana: buang spasi
+            $phone = preg_replace('/\s+/', '', $input['phone']);
+
+            // Contoh validasi: hanya angka, panjang 10–15 digit
+            if (!preg_match('/^[0-9]{10,15}$/', $phone)) {
+                $errors[] = 'Phone number is not valid';
+            } else {
+                // Cek unik di tabel users
+                $this->db->where('phone', $phone);
+                if ($this->db->count_all_results('users') > 0) {
+                    $errors[] = 'Phone number already exists';
+                }
+            }
+        }
+
+        // ==========================
+        // Validasi password
+        // ==========================
+        if (!isset($input['password']) || empty($input['password'])) {
+            $errors[] = 'Password is required';
+        } else if (strlen($input['password']) < 6) {
+            $errors[] = 'Password must be at least 6 characters';
+        }
+
+        // Jika ada error validasi
+        if (!empty($errors)) {
+            http_response_code(400);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => implode(', ', $errors)
+            ]);
+            return;
+        }
+
+        // Hash password
+        $password_hash = password_hash($input['password'], PASSWORD_DEFAULT);
+
+        // Pastikan $phone & $email & $username sudah terisi dari blok di atas
+        $data = [
+            'username'                 => $username,
+            'email'                    => $email,
+            'phone'                    => $phone,
+            'password'                 => $password_hash,
+            'balance'                  => 0,
+            'total_correct_predictions' => 0,
+            'total_predictions'        => 0,
+            'created_at'               => date('Y-m-d H:i:s'),
+            'role'                     => 'user'
+        ];
+
+        if ($this->User_model->create_user($data)) {
+            $user_id = $this->db->insert_id();
+
+            echo json_encode([
+                'status'  => TRUE,
+                'message' => 'Registration successful',
+                'data'    => [
+                    'user_id'  => $user_id,
+                    'username' => $data['username'],
+                    'email'    => $data['email'],
+                    'phone'    => $data['phone'],
+                    'role'     => $data['role']
+                ]
+            ]);
+        } else {
+            http_response_code(500);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'Registration failed'
+            ]);
+        }
+    }
+
+    /**
+     * User login
+     * POST /api/login
+     */
+    public function login()
+    {
+        header('Content-Type: application/json');
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        log_message("DEBUG", '[LOGIN] Raw input: ' . print_r($input, true));
+
+        $errors = [];
+
+        if (!isset($input['username']) || empty(trim($input['username']))) {
+            $errors[] = 'Username is required';
+        }
+
+        if (!isset($input['password']) || empty($input['password'])) {
+            $errors[] = 'Password is required';
+        }
+
+        if (!empty($errors)) {
+            http_response_code(400);
+            echo json_encode([
+                'status' => FALSE,
+                'message' => implode(', ', $errors)
+            ]);
+            return;
+        }
+
+        $username = trim($input['username']);
+        $password = $input['password'];
+
+        $user = $this->User_model->get_user_by_username($username);
+
+        // Debug password verification
+        if ($user) {
+            log_message("DEBUG", '[LOGIN] User found, verifying password...');
+            $verify_result = password_verify($password, $user->password);
+            log_message("DEBUG", '[LOGIN] Password verify result: ' . ($verify_result ? 'TRUE' : 'FALSE'));
+        }
+
+        if ($user && password_verify($password, $user->password)) {
+            echo json_encode([
+                'status' => TRUE,
+                'message' => 'Login successful',
+                'data' => [
+                    'user_id' => $user->id,
+                    'username' => $user->username,
+                    'email' => $user->email,
+                    'phone' => $user->phone,
+                    'balance' => $user->balance,
+                    'role' => $user->role,
+                    'total_predictions' => $user->total_predictions,
+                    'total_correct_predictions' => $user->total_correct_predictions
+                ]
+            ]);
+        } else {
+            http_response_code(401);
+            echo json_encode([
+                'status' => FALSE,
+                'message' => 'Invalid username or password'
+            ]);
+        }
+    }
+
+    /**
+     * Get user profile
+     * GET /api/profile?user_id=1
+     */
+    public function profile()
+    {
+        header('Content-Type: application/json');
+
+        $user_id = $this->input->get('user_id');
+
+        if (!$user_id) {
+            http_response_code(400);
+            echo json_encode([
+                "status" => FALSE,
+                "message" => "User ID is required"
+            ]);
+            return;
+        }
+
+        $user = $this->User_model->get_user_by_id($user_id);
+
+        if ($user) {
+            echo json_encode([
+                "status" => TRUE,
+                "data" => [
+                    'user_id' => $user->id,
+                    'username' => $user->username,
+                    'balance' => $user->balance,
+                    'phone' => $user->phone,
+                    'email' => $user->email,
+                    'role' => $user->role,
+                    'total_predictions' => $user->total_predictions,
+                    'total_correct_predictions' => $user->total_correct_predictions,
+                    'accuracy' => $user->total_predictions > 0 ?
+                        round(($user->total_correct_predictions / $user->total_predictions) * 100, 2) : 0
+                ]
+            ]);
+        } else {
+            http_response_code(404);
+            echo json_encode([
+                "status" => FALSE,
+                "message" => "User not found"
+            ]);
+        }
+    }
+
+    // ==================== MATCH APIs ====================
+
+    /**
+     * Get all matches
+     * GET /api/matches
+     */
+    public function matches()
+    {
+        header('Content-Type: application/json');
+
+        $this->db->select('*');
+        $this->db->from('matches');
+        $this->db->order_by('match_date', 'DESC');
+        $this->db->order_by('match_time', 'DESC');
+        $matches = $this->db->get()->result();
+
+        echo json_encode([
+            "status" => TRUE,
+            "data" => $matches
+        ]);
+    }
+
+    /**
+     * Get upcoming matches
+     * GET /api/matches/upcoming
+     */
+    public function upcoming_matches()
+    {
+        header('Content-Type: application/json');
+
+        $this->db->select('
+        matches.*,
+        leagues.name AS league_name,
+        home_team.name AS home_team_name,
+        home_team.logo AS home_logo,
+        away_team.name AS away_team_name,
+        away_team.logo AS away_logo
+    ');
+        $this->db->from('matches');
+
+        // JOIN leagues
+        $this->db->join('leagues', 'leagues.id = matches.league_id', 'left');
+
+        // JOIN teams as home & away
+        $this->db->join('teams AS home_team', 'home_team.id = matches.home_team_id', 'left');
+        $this->db->join('teams AS away_team', 'away_team.id = matches.away_team_id', 'left');
+
+        $this->db->where('matches.status', 'scheduled');
+        $this->db->where('matches.match_date >=', date('Y-m-d'));
+        $this->db->order_by('matches.match_date', 'ASC');
+        $this->db->order_by('matches.match_time', 'ASC');
+
+        $matches = $this->db->get()->result();
+
+        // Convert logo path → full URL
+        foreach ($matches as &$m) {
+            if (!empty($m->home_logo) && strpos($m->home_logo, 'http') !== 0) {
+                $m->home_logo = base_url($m->home_logo);
+            }
+            if (!empty($m->away_logo) && strpos($m->away_logo, 'http') !== 0) {
+                $m->away_logo = base_url($m->away_logo);
+            }
+        }
+
+        echo json_encode([
+            "status" => TRUE,
+            "data"   => $matches
+        ]);
+    }
+
+
+
+    /**
+     * Get finished matches
+     * GET /api/matches/finished
+     */
+    public function finished_matches()
+    {
+        header('Content-Type: application/json');
+
+        $this->db->select('
+        matches.*,
+        leagues.name AS league_name,
+        home_team.name AS home_team_name,
+        home_team.logo AS home_logo,
+        away_team.name AS away_team_name,
+        away_team.logo AS away_logo
+    ');
+        $this->db->from('matches');
+
+        // JOIN leagues
+        $this->db->join('leagues', 'leagues.id = matches.league_id', 'left');
+
+        // JOIN home & away teams
+        $this->db->join('teams AS home_team', 'home_team.id = matches.home_team_id', 'left');
+        $this->db->join('teams AS away_team', 'away_team.id = matches.away_team_id', 'left');
+
+        $this->db->where('matches.status', 'finished');
+        $this->db->order_by('matches.match_date', 'DESC');
+        $this->db->order_by('matches.match_time', 'DESC');
+
+        $matches = $this->db->get()->result();
+
+        // Convert logo path → absolute URL
+        foreach ($matches as &$m) {
+            if (!empty($m->home_logo) && strpos($m->home_logo, 'http') !== 0) {
+                $m->home_logo = base_url($m->home_logo);
+            }
+            if (!empty($m->away_logo) && strpos($m->away_logo, 'http') !== 0) {
+                $m->away_logo = base_url($m->away_logo);
+            }
+        }
+
+        echo json_encode([
+            "status" => TRUE,
+            "data"   => $matches
+        ]);
+    }
+
+
+    /**
+     * Get single match
+     * GET /api/matches/:id
+     */
+    public function get_match($id)
+    {
+        header('Content-Type: application/json');
+
+        $match = $this->Match_model->get_match_by_id($id);
+
+        if ($match) {
+            echo json_encode([
+                "status" => TRUE,
+                "data" => $match
+            ]);
+        } else {
+            http_response_code(404);
+            echo json_encode([
+                "status" => FALSE,
+                "message" => "Match not found"
+            ]);
+        }
+    }
+
+    // ==================== PREDICTION APIs ====================
+
+    /**
+     * Submit prediction
+     * POST /api/predictions
+     * GET  /api/predictions?user_id=XX
+     */
+    public function predictions()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') === 'POST') {
+            $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+            log_message("DEBUG", '[PREDICTION] Raw input: ' . print_r($input, true));
+
+            $errors = [];
+
+            if (!isset($input['user_id']) || empty($input['user_id'])) {
+                $errors[] = 'User ID is required';
+            }
+
+            if (!isset($input['match_id']) || empty($input['match_id'])) {
+                $errors[] = 'Match ID is required';
+            }
+
+            // Validasi predicted_result
+            if (!isset($input['prediction']) || empty($input['prediction'])) {
+                $errors[] = 'Predicted result is required';
+            } else {
+                $valid_results = ['home_win', 'away_win', 'draw'];
+                if (!in_array($input['prediction'], $valid_results)) {
+                    $errors[] = 'Predicted result must be: home_win, away_win, or draw';
+                }
+            }
+
+            if (!empty($errors)) {
+                http_response_code(400);
+                echo json_encode([
+                    'status'  => FALSE,
+                    'message' => implode(', ', $errors)
+                ]);
+                return;
+            }
+
+            // Check if match exists and is upcoming
+            $match = $this->Match_model->get_match_by_id($input['match_id']);
+            if (!$match) {
+                http_response_code(404);
+                echo json_encode([
+                    'status'  => FALSE,
+                    'message' => 'Match not found'
+                ]);
+                return;
+            }
+
+            // Ambil setting dari system_settings
+            $prediction_deadline_minutes = (int) $this->Settings_model->get_setting('prediction_deadline_minutes');
+
+            // Gabungkan match_date dan match_time dari database
+            $match_datetime = $match->match_date . ' ' . $match->match_time;
+
+            // DEBUG: Log untuk verifikasi
+            log_message("DEBUG", "[PREDICTION_DEADLINE] Combined match datetime: " . $match_datetime);
+            log_message("DEBUG", "[PREDICTION_DEADLINE] Current server time: " . date('Y-m-d H:i:s'));
+
+            $match_timestamp    = strtotime($match_datetime);
+            $current_timestamp  = time();
+            $deadline_timestamp = $match_timestamp - ($prediction_deadline_minutes * 60);
+
+            log_message("DEBUG", "[PREDICTION_DEADLINE] Match timestamp: " . date('Y-m-d H:i:s', $match_timestamp));
+            log_message("DEBUG", "[PREDICTION_DEADLINE] Deadline timestamp: " . date('Y-m-d H:i:s', $deadline_timestamp));
+            log_message("DEBUG", "[PREDICTION_DEADLINE] Minutes until deadline: " . round(($deadline_timestamp - $current_timestamp) / 60, 2));
+
+            if ($current_timestamp > $deadline_timestamp) {
+                http_response_code(400);
+                echo json_encode([
+                    'status'                    => FALSE,
+                    'message'                   => "Cannot update prediction. Deadline has passed (closes $prediction_deadline_minutes minutes before match)",
+                    'predictionDeadlineMinutes' => $prediction_deadline_minutes,
+                ]);
+                return;
+            }
+
+            if ($match->status !== 'scheduled') {
+                http_response_code(400);
+                echo json_encode([
+                    'status'  => FALSE,
+                    'message' => 'Cannot predict on ongoing or finished matches'
+                ]);
+                return;
+            }
+
+            // Check if prediction already exists
+            $existing_prediction = $this->Prediction_model->get_prediction($input['user_id'], $input['match_id']);
+
+            // Process prediction
+            $prediction_data = [
+                'user_id'          => $input['user_id'],
+                'match_id'         => $input['match_id'],
+                'predicted_result' => $input['prediction']
+            ];
+
+            if ($existing_prediction) {
+                // UPDATE existing prediction
+                if ($this->Prediction_model->update_prediction($existing_prediction->id, $prediction_data)) {
+                    echo json_encode([
+                        'status'                    => TRUE,
+                        'message'                   => 'Prediction updated successfully',
+                        'predictionDeadlineMinutes' => $prediction_deadline_minutes,
+                    ]);
+                } else {
+                    http_response_code(500);
+                    echo json_encode([
+                        'status'  => FALSE,
+                        'message' => 'Failed to update prediction'
+                    ]);
+                }
+            } else {
+                // CREATE new prediction
+                if ($this->Prediction_model->create_prediction($prediction_data)) {
+                    echo json_encode([
+                        'status'                    => TRUE,
+                        'message'                   => 'Prediction submitted successfully',
+                        'predictionDeadlineMinutes' => $prediction_deadline_minutes,
+                    ]);
+                } else {
+                    http_response_code(500);
+                    echo json_encode([
+                        'status'  => FALSE,
+                        'message' => 'Failed to submit prediction'
+                    ]);
+                }
+            }
+        } else {
+            // GET request - get user predictions
+            $user_id = $this->input->get('user_id');
+
+            if (!$user_id) {
+                http_response_code(400);
+                echo json_encode([
+                    "status"  => FALSE,
+                    "message" => "User ID is required"
+                ]);
+                return;
+            }
+
+            $predictions = $this->Prediction_model->get_user_predictions($user_id);
+
+            // Ambil setting untuk dikirim ke client juga
+            $prediction_deadline_minutes = (int) $this->Settings_model->get_setting('prediction_deadline_minutes');
+
+            echo json_encode([
+                "status"                   => TRUE,
+                "predictionDeadlineMinutes" => $prediction_deadline_minutes,
+                "data"                     => $predictions
+            ]);
+        }
+    }
+
+
+    /**
+     * Get user predictions with match details
+     * GET /api/my_predictions?user_id=1
+     */
+    public function my_predictions()
+    {
+        header('Content-Type: application/json');
+
+        $user_id = $this->input->get('user_id');
+
+        if (!$user_id) {
+            http_response_code(400);
+            echo json_encode([
+                "status" => FALSE,
+                "message" => "User ID is required"
+            ]);
+            return;
+        }
+
+        $predictions = $this->Prediction_model->get_user_predictions_with_match_details($user_id);
+
+        echo json_encode([
+            "status" => TRUE,
+            "data" => $predictions
+        ]);
+    }
+
+    /**
+     * Get prediction results (evaluated predictions)
+     * GET /api/prediction_results?user_id=1
+     */
+    public function prediction_results()
+    {
+        header('Content-Type: application/json');
+
+        $user_id = $this->input->get('user_id');
+
+        if (!$user_id) {
+            http_response_code(400);
+            echo json_encode([
+                "status" => FALSE,
+                "message" => "User ID is required"
+            ]);
+            return;
+        }
+
+        // Jika table predictions, bukan user_predictions
+        $this->db->select('
+        p.*, 
+        m.home_team_id, 
+        m.away_team_id, 
+        m.home_score, 
+        m.away_score, 
+        m.status as match_status,
+        ht.name as home_team_name,
+        at.name as away_team_name
+    ');
+        $this->db->from('user_predictions p'); // Ganti user_predictions menjadi predictions
+        $this->db->join('matches m', 'p.match_id = m.id');
+        $this->db->join('teams ht', 'm.home_team_id = ht.id', 'left');
+        $this->db->join('teams at', 'm.away_team_id = at.id', 'left');
+        $this->db->where('p.user_id', $user_id);
+        $this->db->where('m.status', 'finished');
+        $this->db->where('p.is_correct IS NOT NULL'); // Sesuaikan dengan nama table
+
+
+        $results = $this->db->get()->result();
+
+        echo json_encode([
+            "status" => TRUE,
+            "data" => $results
+        ]);
+    }
+
+    /**
+     * GET /api/leaderboard
+     * Bisa pakai filter manual: week_number, league_id, season
+     */
+    public function leaderboard()
+    {
+        header('Content-Type: application/json');
+
+        $week_number = $this->input->get('week_number');
+        $league_id   = $this->input->get('league_id');
+        $season      = $this->input->get('season') ?: '2024/2025';
+
+        $leaderboard = $this->_build_leaderboard($week_number, $league_id, $season);
+
+        echo json_encode([
+            "status"  => TRUE,
+            "type"    => "custom",
+            "data"    => $leaderboard,
+            "filters" => [
+                "week_number" => $week_number,
+                "league_id"   => $league_id,
+                "season"      => $season
+            ]
+        ]);
+    }
+    /**
+     * GET /api/leaderboard/weekly?league_id=1
+     */
+    public function leaderboard_weekly()
+    {
+        header('Content-Type: application/json');
+    
+        $league_id = (int) $this->input->get('league_id');
+        if ($league_id <= 0) {
+            echo json_encode(['status' => FALSE, 'message' => 'league_id is required']);
+            return;
+        }
+    
+        // ✅ kalau user pilih GW dari app, pakai ini
+        $requestedWeek = $this->input->get('week_number');
+        $requestedWeek = $requestedWeek !== null ? (int) $requestedWeek : null;
+    
+        // kalau tidak ada week_number, ambil yang latest berdasarkan finished
+        if ($requestedWeek && $requestedWeek > 0) {
+            $weekNumber = $requestedWeek;
+        } else {
+            $latestWeekRow = $this->db
+                ->select('MAX(week_number) AS week_number', false)
+                ->from('matches')
+                ->where('league_id', $league_id)
+                ->where('status', 'finished')
+                ->get()
+                ->row();
+    
+            $weekNumber = $latestWeekRow ? (int)$latestWeekRow->week_number : null;
+        }
+    
+        if (!$weekNumber) {
+            echo json_encode(['status' => FALSE, 'message' => 'No week found for this league']);
+            return;
+        }
+    
+        $this->db->select('
+            u.id,
+            u.username,
+            u.email,
+    
+            COUNT(p.id) AS total_predictions,
+            SUM(CASE WHEN p.is_correct = 1 THEN 1 ELSE 0 END) AS total_correct_predictions,
+    
+            SUM(CASE WHEN p.is_correct IS NULL THEN 1 ELSE 0 END) AS pending_predictions,
+            SUM(CASE WHEN p.is_correct IS NOT NULL THEN 1 ELSE 0 END) AS played_predictions,
+    
+            SUM(CASE WHEN p.result_type = "exact" THEN 1 ELSE 0 END) AS exact_predictions,
+            SUM(CASE WHEN p.result_type = "correct" THEN 1 ELSE 0 END) AS correct_predictions,
+            COALESCE(SUM(p.points_earned), 0) AS points
+        ', false);
+    
+        $this->db->from('users u');
+        $this->db->join('user_predictions p', 'p.user_id = u.id', 'left');
+        $this->db->join('matches m', 'm.id = p.match_id', 'left');
+    
+        $this->db->where('u.role', 'user');
+        $this->db->where('m.league_id', $league_id);
+        $this->db->where('m.week_number', $weekNumber);
+        $this->db->where('p.id IS NOT NULL', null, false);
+    
+        $this->db->group_by('u.id');
+        $this->db->order_by('points', 'DESC');
+        $this->db->order_by('total_correct_predictions', 'DESC');
+        $this->db->order_by('exact_predictions', 'DESC');
+        $this->db->order_by('total_predictions', 'DESC');
+        $this->db->limit(50);
+    
+        $rows = $this->db->get()->result();
+    
+        $rank = 1;
+        foreach ($rows as $row) {
+            $row->rank = $rank++;
+            $played = (int) $row->played_predictions;
+            $correct = (int) $row->total_correct_predictions;
+            $row->accuracy = $played > 0 ? round(($correct / $played) * 100, 2) : 0;
+        }
+    
+        echo json_encode([
+            'status' => TRUE,
+            'data'   => $rows,
+            'filter' => [
+                'type'        => 'weekly',
+                'league_id'   => $league_id,
+                'week_number' => $weekNumber,
+            ],
+        ]);
+    }
+
+
+    /**
+     * GET /api/leaderboard/season?league_id=1&season=2024/2025
+     */
+    public function leaderboard_season()
+    {
+        header('Content-Type: application/json');
+
+        $league_id = (int) $this->input->get('league_id');
+        $season    = $this->input->get('season') ?: '2024/2025';
+
+        if ($league_id <= 0) {
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'league_id is required',
+            ]);
+            return;
+        }
+
+        $this->db->select('
+        u.id,
+        u.username,
+        u.email,
+        COUNT(p.id) AS total_predictions,
+        SUM(CASE WHEN p.is_correct = 1 THEN 1 ELSE 0 END) AS total_correct_predictions,
+        SUM(CASE WHEN p.result_type = "exact" THEN 1 ELSE 0 END) AS exact_predictions,
+        SUM(CASE WHEN p.result_type = "correct" THEN 1 ELSE 0 END) AS correct_predictions,
+        COALESCE(SUM(p.points_earned), 0) AS total_points
+    ');
+        $this->db->from('users u');
+        $this->db->join('user_predictions p', 'p.user_id = u.id', 'left');
+        $this->db->join('matches m', 'm.id = p.match_id', 'left');
+
+        $this->db->where('u.role', 'user');
+        $this->db->where('m.league_id', $league_id);
+        $this->db->where('m.status', 'finished');
+        $this->db->where('m.season', $season);
+
+        $this->db->group_by('u.id');
+        $this->db->order_by('total_points', 'DESC');
+        $this->db->order_by('total_correct_predictions', 'DESC');
+        $this->db->order_by('exact_predictions', 'DESC');
+        $this->db->limit(50);
+
+        $rows = $this->db->get()->result();
+
+        $rank = 1;
+        foreach ($rows as $row) {
+            $row->rank     = $rank++;
+            $row->accuracy = $row->total_predictions > 0
+                ? round(($row->total_correct_predictions / $row->total_predictions) * 100, 2)
+                : 0;
+        }
+
+        echo json_encode([
+            'status' => TRUE,
+            'data'   => $rows,
+            'filter' => [
+                'type'      => 'season',
+                'league_id' => $league_id,
+                'season'    => $season,
+            ],
+        ]);
+    }
+
+    // ==================== UTILITY APIs ====================
+
+    /**
+     * Health check
+     * GET /api/health
+     */
+    public function health()
+    {
+        header('Content-Type: application/json');
+
+        echo json_encode([
+            "status" => TRUE,
+            "message" => "API is running",
+            "timestamp" => date('Y-m-d H:i:s'),
+            "version" => "1.0.0"
+        ]);
+    }
+
+    /**
+     * Get user stats
+     * GET /api/user_stats?user_id=1
+     */
+    public function user_stats()
+    {
+        header('Content-Type: application/json');
+
+        $user_id = (int) $this->input->get('user_id');
+
+        if ($user_id <= 0) {
+            http_response_code(400);
+            echo json_encode([
+                "status"  => FALSE,
+                "message" => "User ID is required"
+            ]);
+            return;
+        }
+
+        $user = $this->User_model->get_user_by_id($user_id);
+
+        if (!$user) {
+            http_response_code(404);
+            echo json_encode([
+                "status"  => FALSE,
+                "message" => "User not found"
+            ]);
+            return;
+        }
+
+        // Get additional stats
+        $this->db->where('user_id', $user_id);
+        $total_predictions = $this->db->count_all_results('user_predictions');
+
+        $this->db->where('user_id', $user_id);
+        $this->db->where('is_correct', 1);
+        $correct_predictions = $this->db->count_all_results('user_predictions');
+
+        $this->db->select_sum('points_earned');
+        $this->db->where('user_id', $user_id);
+        $total_points_result = $this->db->get('user_predictions')->row();
+        $total_points = $total_points_result->points_earned ?? 0;
+
+        // hitung akurasi
+        $accuracy = 0;
+        if ($total_predictions > 0) {
+            $accuracy = round(($correct_predictions / $total_predictions) * 100, 2);
+        }
+
+        $stats = [
+            'user_id'            => (int) $user->id,
+            'username'           => $user->username,
+            'total_predictions'  => (int) $total_predictions,
+            'correct_predictions' => (int) $correct_predictions,
+            'total_points'       => (float) $total_points,
+            'accuracy'           => $accuracy,
+            'rank'               => 'N/A', // TODO: implement ranking logic
+            'balance'            => isset($user->balance)       // NEW  saldo dari tabel users
+                ? (float) $user->balance
+                : 0.0,
+        ];
+
+        echo json_encode([
+            "status" => TRUE,
+            "data"   => $stats
+        ]);
+    }
+
+
+    /**
+     * Base builder leaderboard
+     * USED BY: /api/leaderboard, /api/leaderboard/weekly, /api/leaderboard/season
+     */
+    private function _build_leaderboard($week_number = null, $league_id = null, $season = '2024/2025')
+    {
+        // Base query
+        $this->db->select('
+        u.id, 
+        u.username, 
+        u.email,
+        COUNT(p.id) as total_predictions, 
+        SUM(CASE WHEN p.is_correct = 1 THEN 1 ELSE 0 END) as total_correct_predictions,
+        SUM(CASE WHEN p.result_type = "exact" THEN 1 ELSE 0 END) as exact_predictions,
+        SUM(CASE WHEN p.result_type = "correct" THEN 1 ELSE 0 END) as correct_predictions,
+        COALESCE(SUM(p.points_earned), 0) as total_points
+    ');
+
+        $this->db->from('users u');
+        $this->db->join('user_predictions p', 'p.user_id = u.id', 'left');
+        $this->db->join('matches m', 'm.id = p.match_id', 'left');
+
+        // Apply filters
+        if ($week_number) {
+            $this->db->where('m.week_number', $week_number);
+        }
+
+        if ($league_id) {
+            $this->db->where('m.league_id', $league_id);
+        }
+
+        if ($season) {
+            $this->db->where('m.season', $season);
+        }
+
+        $this->db->where('u.role', 'user');
+        $this->db->where('m.status', 'finished'); // Only finished matches
+        $this->db->group_by('u.id');
+
+        // Order by points (DESC) lalu correct predictions (DESC)
+        $this->db->order_by('total_correct_predictions', 'DESC');
+        $this->db->order_by('exact_predictions', 'DESC');
+        $this->db->limit(20);
+
+        $leaderboard = $this->db->get()->result();
+
+        // Calculate accuracy and add rank
+        $rank = 1;
+        foreach ($leaderboard as $user) {
+            $user->rank = $rank++;
+            $user->accuracy = $user->total_predictions > 0
+                ? round(($user->total_correct_predictions / $user->total_predictions) * 100, 2)
+                : 0;
+        }
+
+        return $leaderboard;
+    }
+
+    public function withdraw_request()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'POST') {
+            $this->output->set_status_header(405);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Method not allowed',
+            ]);
+            return;
+        }
+
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        log_message("DEBUG", '[WITHDRAW] Raw input: ' . print_r($input, true));
+
+        $errors = [];
+
+        $user_id        = isset($input['user_id']) ? (int)$input['user_id'] : 0;
+        $bank_name      = trim($input['bank_name'] ?? '');
+        $account_number = trim($input['account_number'] ?? '');
+        $account_owner  = trim($input['account_owner'] ?? '');
+        // Kalau mau support nominal custom:
+        // $amount         = isset($input['amount']) ? (float)$input['amount'] : 0;
+
+        // Validasi dasar
+        if ($user_id <= 0) {
+            $errors[] = 'User ID is required';
+        }
+
+        if ($bank_name === '') {
+            $errors[] = 'Nama bank wajib diisi';
+        }
+
+        if ($account_number === '') {
+            $errors[] = 'Nomor rekening wajib diisi';
+        }
+
+        if ($account_owner === '') {
+            $errors[] = 'Nama pemilik rekening wajib diisi';
+        }
+
+        // Cek user & saldo
+        if ($user_id > 0) {
+            $user = $this->db->get_where('users', ['id' => $user_id])->row();
+            if (!$user) {
+                $errors[] = 'User tidak ditemukan';
+            } else {
+                // asumsi di tabel users ada kolom "balance"
+                $balance = (float)$user->balance;
+                if ($balance <= 0) {
+                    $errors[] = 'Saldo tidak mencukupi untuk ditarik';
+                }
+            }
+        }
+
+        if (!empty($errors)) {
+            $this->output->set_status_header(422);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Validasi gagal',
+                'errors'  => $errors,
+            ]);
+            return;
+        }
+
+        // Kalau amount tidak dikirim dari client, pakai full balance user
+        $amount = (float)$user->balance;
+
+        $now = date('Y-m-d H:i:s');
+
+        $data = [
+            'user_id'        => $user_id,
+            'bank_name'      => $bank_name,
+            'account_number' => $account_number,
+            'account_owner'  => $account_owner,
+            'amount'         => $amount,
+            'status'         => 'pending',
+            'created_at'     => $now,
+            'updated_at'     => $now,
+        ];
+
+        $ok = $this->db->insert('withdraw_requests', $data);
+
+        if (!$ok) {
+            $this->output->set_status_header(500);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Gagal menyimpan permintaan penarikan',
+            ]);
+            return;
+        }
+
+        $id = $this->db->insert_id();
+
+        // NOTE:
+        // Saldo user TIDAK langsung dipotong di sini.
+        // Biasanya dipotong saat admin "approve" di backend.
+        // Kalau mau langsung potong, di sini tambahkan update users.balance.
+
+        echo json_encode([
+            'status'  => true,
+            'message' => 'Permintaan penarikan berhasil dibuat. Menunggu persetujuan admin.',
+            'data'    => [
+                'id'            => $id,
+                'amount'        => $amount,
+                'status'        => 'pending',
+                'bank_name'     => $bank_name,
+                'account_owner' => $account_owner,
+            ],
+        ]);
+    }
+
+    public function withdraw_requests()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'GET') {
+            $this->output->set_status_header(405);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Method not allowed',
+            ]);
+            return;
+        }
+
+        $user_id = (int)$this->input->get('user_id');
+        $status  = $this->input->get('status'); // optional: pending/approved/rejected
+
+        if ($user_id <= 0) {
+            $this->output->set_status_header(422);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'user_id is required',
+            ]);
+            return;
+        }
+
+        $this->db->from('withdraw_requests');
+        $this->db->where('user_id', $user_id);
+        if (!empty($status)) {
+            $this->db->where('status', $status);
+        }
+        $this->db->order_by('created_at', 'DESC');
+        $rows = $this->db->get()->result_array();
+
+        echo json_encode([
+            'status'  => true,
+            'message' => 'OK',
+            'data'    => $rows,
+        ]);
+    }
+
+    /**
+     * GET /api/promos
+     * Ambil daftar promo/banner untuk home
+     */
+    public function promos()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'GET') {
+            http_response_code(405);
+            echo json_encode([
+                'status'  => 'error',
+                'message' => 'Method not allowed'
+            ]);
+            return;
+        }
+
+        try {
+            $limit = (int) $this->input->get('limit');
+            if ($limit <= 0 || $limit > 50) {
+                $limit = 10;
+            }
+
+            $rows = $this->promo->get_active_promos($limit);
+
+            echo json_encode([
+                'status' => 'success',
+                'data'   => $rows,
+            ]);
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode([
+                'status'  => 'error',
+                'message' => 'Server error',
+            ]);
+        }
+    }
+}
