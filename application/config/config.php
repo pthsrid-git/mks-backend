@@ -1,7 +1,7 @@
 <?php
-defined("BASEPATH") OR exit("No direct script access allowed");
+defined("BASEPATH") or exit("No direct script access allowed");
 
-$config["base_url"] = "https://hsrsystem.com/mks/";
+$config["base_url"] = "http://192.168.1.8:8091/";
 $config["index_page"] = "";
 $config["uri_protocol"] = "REQUEST_URI";
 $config["url_suffix"] = "";
@@ -28,7 +28,7 @@ $config["encryption_key"] = "prediction123system456key789";
 $config["sess_driver"] = "files";
 $config["sess_cookie_name"] = "ci_session";
 $config["sess_expiration"] = 7200;
-$config["sess_save_path"] = NULL;
+$config['sess_save_path'] = APPPATH . 'cache/sessions/';
 $config["sess_match_ip"] = FALSE;
 $config["sess_time_to_update"] = 300;
 $config["sess_regenerate_destroy"] = FALSE;

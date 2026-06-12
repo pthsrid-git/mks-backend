@@ -1,0 +1,51 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mks_backend_app
+    restart: unless-stopped
+    ports:
+      - "8091:80"
+    volumes:
+      - ./:/var/www/html
+    depends_on:
+      - db
+    environment:
+      TZ: Asia/Jakarta
+
+  db:
+    image: mysql:5.7
+    platform: linux/amd64
+    container_name: mks_backend_db
+    restart: unless-stopped
+    ports:
+      - "3310:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: mks_db
+      MYSQL_USER: mks_user
+      MYSQL_PASSWORD: mks_pass123
+      TZ: Asia/Jakarta
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./database.sql:/docker-entrypoint-initdb.d/01_database.sql
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    platform: linux/amd64
+    container_name: mks_backend_phpmyadmin
+    restart: unless-stopped
+    ports:
+      - "8092:80"
+    depends_on:
+      - db
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      MYSQL_ROOT_PASSWORD: root123
+      UPLOAD_LIMIT: 256M
+      TZ: Asia/Jakarta
+
+volumes:
+  db_data:

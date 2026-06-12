@@ -12,9 +12,8 @@
 	},
 	"require": {
 		"php": ">=5.3.7",
-		"guzzlehttp/guzzle": "7.8.2",
-		"google/auth": "1.37.2",
-		"firebase/php-jwt": "6.4.0"
+		"guzzlehttp/guzzle": "*",
+		"google/auth": "^1.35"
 	},
 	"suggest": {
 		"paragonie/random_compat": "Provides better randomness in PHP 5.x"
