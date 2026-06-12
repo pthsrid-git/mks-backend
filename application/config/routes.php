@@ -1,5 +1,5 @@
 <?php
-defined('BASEPATH') OR exit('No direct script access allowed');
+defined('BASEPATH') or exit('No direct script access allowed');
 
 // Admin Routes
 $route['admin'] = 'admin/index';
@@ -89,6 +89,12 @@ $route['admin/match_update/toggle_auto_update'] = '/match_update/toggle_auto_upd
 $route['admin/withdraw']          = 'withdraw/index';
 $route['admin/withdraw/approve/(:num)'] = 'withdraw/approve/$1';
 $route['admin/withdraw/reject/(:num)']  = 'withdraw/reject/$1';
+
+$route['api/forgot_password']['post'] = 'api/forgot_password';
+$route['api/fcm/register_token']['post'] = 'api/register_fcm_token';
+
+$route['api/notifications']['get'] = 'api/notifications';
+$route['api/notification_mark_read']['post'] = 'api/notification_mark_read';
 
 
 $route['default_controller'] = 'auth/admin_login';

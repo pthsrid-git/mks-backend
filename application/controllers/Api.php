@@ -658,17 +658,17 @@ class Api extends CI_Controller
     public function leaderboard_weekly()
     {
         header('Content-Type: application/json');
-    
+
         $league_id = (int) $this->input->get('league_id');
         if ($league_id <= 0) {
             echo json_encode(['status' => FALSE, 'message' => 'league_id is required']);
             return;
         }
-    
+
         // ✅ kalau user pilih GW dari app, pakai ini
         $requestedWeek = $this->input->get('week_number');
         $requestedWeek = $requestedWeek !== null ? (int) $requestedWeek : null;
-    
+
         // kalau tidak ada week_number, ambil yang latest berdasarkan finished
         if ($requestedWeek && $requestedWeek > 0) {
             $weekNumber = $requestedWeek;
@@ -680,15 +680,15 @@ class Api extends CI_Controller
                 ->where('status', 'finished')
                 ->get()
                 ->row();
-    
+
             $weekNumber = $latestWeekRow ? (int)$latestWeekRow->week_number : null;
         }
-    
+
         if (!$weekNumber) {
             echo json_encode(['status' => FALSE, 'message' => 'No week found for this league']);
             return;
         }
-    
+
         $this->db->select('
             u.id,
             u.username,
@@ -704,25 +704,25 @@ class Api extends CI_Controller
             SUM(CASE WHEN p.result_type = "correct" THEN 1 ELSE 0 END) AS correct_predictions,
             COALESCE(SUM(p.points_earned), 0) AS points
         ', false);
-    
+
         $this->db->from('users u');
         $this->db->join('user_predictions p', 'p.user_id = u.id', 'left');
         $this->db->join('matches m', 'm.id = p.match_id', 'left');
-    
+
         $this->db->where('u.role', 'user');
         $this->db->where('m.league_id', $league_id);
         $this->db->where('m.week_number', $weekNumber);
         $this->db->where('p.id IS NOT NULL', null, false);
-    
+
         $this->db->group_by('u.id');
         $this->db->order_by('points', 'DESC');
         $this->db->order_by('total_correct_predictions', 'DESC');
         $this->db->order_by('exact_predictions', 'DESC');
         $this->db->order_by('total_predictions', 'DESC');
         $this->db->limit(50);
-    
+
         $rows = $this->db->get()->result();
-    
+
         $rank = 1;
         foreach ($rows as $row) {
             $row->rank = $rank++;
@@ -730,7 +730,7 @@ class Api extends CI_Controller
             $correct = (int) $row->total_correct_predictions;
             $row->accuracy = $played > 0 ? round(($correct / $played) * 100, 2) : 0;
         }
-    
+
         echo json_encode([
             'status' => TRUE,
             'data'   => $rows,
@@ -1142,5 +1142,743 @@ class Api extends CI_Controller
                 'message' => 'Server error',
             ]);
         }
+    }
+
+    /**
+     * Forgot password / Reset password by phone
+     * POST /api/forgot_password
+     *
+     * Body JSON:
+     * {
+     *   "phone": "081287222400",
+     *   "password": "passwordbaru",
+     *   "password_confirm": "passwordbaru"
+     * }
+     */
+    public function forgot_password()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'POST') {
+            http_response_code(405);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'Method not allowed'
+            ]);
+            return;
+        }
+
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        log_message("DEBUG", '[FORGOT_PASSWORD] Raw input: ' . print_r($input, true));
+
+        $errors = [];
+
+        // ==========================
+        // Ambil dan normalisasi input
+        // ==========================
+        $phone            = isset($input['phone']) ? trim($input['phone']) : '';
+        $password         = isset($input['password']) ? (string)$input['password'] : '';
+        $password_confirm = isset($input['password_confirm']) ? (string)$input['password_confirm'] : '';
+
+        // Buang spasi, dash, titik, kurung
+        $phone = preg_replace('/[\s\-\.\(\)]/', '', $phone);
+
+        // Kalau user input +62, ubah jadi 0
+        // contoh: +6281287222400 -> 081287222400
+        if (strpos($phone, '+62') === 0) {
+            $phone = '0' . substr($phone, 3);
+        }
+
+        // Kalau user input 62 tanpa plus, ubah jadi 0
+        // contoh: 6281287222400 -> 081287222400
+        if (strpos($phone, '62') === 0) {
+            $phone = '0' . substr($phone, 2);
+        }
+
+        // ==========================
+        // Validasi phone
+        // ==========================
+        if ($phone === '') {
+            $errors[] = 'Phone number is required';
+        } elseif (!preg_match('/^[0-9]{10,15}$/', $phone)) {
+            $errors[] = 'Phone number is not valid';
+        }
+
+        // ==========================
+        // Validasi password
+        // ==========================
+        if ($password === '') {
+            $errors[] = 'Password is required';
+        } elseif (strlen($password) < 6) {
+            $errors[] = 'Password must be at least 6 characters';
+        }
+
+        if ($password_confirm === '') {
+            $errors[] = 'Password confirmation is required';
+        } elseif ($password !== $password_confirm) {
+            $errors[] = 'Password confirmation does not match';
+        }
+
+        if (!empty($errors)) {
+            http_response_code(400);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => implode(', ', $errors),
+                'errors'  => $errors,
+            ]);
+            return;
+        }
+
+        // ==========================
+        // Cari user berdasarkan phone
+        // ==========================
+        $user = $this->db
+            ->where('phone', $phone)
+            ->get('users')
+            ->row();
+
+        if (!$user) {
+            http_response_code(404);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'Phone number is not registered'
+            ]);
+            return;
+        }
+
+        // ==========================
+        // Update password
+        // ==========================
+        $password_hash = password_hash($password, PASSWORD_DEFAULT);
+
+        $update_data = [
+            'password' => $password_hash,
+        ];
+
+        // Kalau tabel users punya kolom updated_at, aktifkan ini.
+        // Kalau tidak ada kolom updated_at, biarkan dikomentari.
+        // $update_data['updated_at'] = date('Y-m-d H:i:s');
+
+        $this->db->where('id', $user->id);
+        $ok = $this->db->update('users', $update_data);
+
+        if (!$ok) {
+            http_response_code(500);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'Failed to update password'
+            ]);
+            return;
+        }
+
+        echo json_encode([
+            'status'  => TRUE,
+            'message' => 'Password updated successfully',
+            'data'    => [
+                'user_id'  => (int)$user->id,
+                'username' => $user->username,
+                'phone'    => $phone,
+            ],
+        ]);
+    }
+
+    /**
+     * Register FCM token
+     * POST /api/fcm/register_token
+     *
+     * Body JSON:
+     * {
+     *   "user_id": 1,
+     *   "fcm_token": "xxxxx",
+     *   "device_type": "android",
+     *   "device_name": "Samsung A54"
+     * }
+     */
+    public function register_fcm_token()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'POST') {
+            http_response_code(405);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'Method not allowed'
+            ]);
+            return;
+        }
+
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        log_message("DEBUG", '[REGISTER_FCM_TOKEN] Raw input: ' . print_r($input, true));
+
+        $user_id     = isset($input['user_id']) ? (int)$input['user_id'] : 0;
+        $fcm_token   = trim($input['fcm_token'] ?? '');
+        $device_type = trim($input['device_type'] ?? '');
+        $device_name = trim($input['device_name'] ?? '');
+
+        $errors = [];
+
+        if ($user_id <= 0) {
+            $errors[] = 'User ID is required';
+        }
+
+        if ($fcm_token === '') {
+            $errors[] = 'FCM token is required';
+        }
+
+        if ($user_id > 0) {
+            $user = $this->db->get_where('users', ['id' => $user_id])->row();
+            if (!$user) {
+                $errors[] = 'User not found';
+            }
+        }
+
+        if (!empty($errors)) {
+            http_response_code(400);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => implode(', ', $errors),
+                'errors'  => $errors,
+            ]);
+            return;
+        }
+
+        $existing = $this->db
+            ->where('user_id', $user_id)
+            ->where('fcm_token', $fcm_token)
+            ->get('user_fcm_tokens')
+            ->row();
+
+        $now = date('Y-m-d H:i:s');
+
+        if ($existing) {
+            $this->db->where('id', $existing->id);
+            $ok = $this->db->update('user_fcm_tokens', [
+                'device_type' => $device_type,
+                'device_name' => $device_name,
+                'is_active'   => 1,
+                'updated_at'  => $now,
+            ]);
+
+            if (!$ok) {
+                http_response_code(500);
+                echo json_encode([
+                    'status'  => FALSE,
+                    'message' => 'Failed to update FCM token',
+                ]);
+                return;
+            }
+
+            echo json_encode([
+                'status'  => TRUE,
+                'message' => 'FCM token updated',
+                'data'    => [
+                    'id'      => (int)$existing->id,
+                    'user_id' => $user_id,
+                ],
+            ]);
+            return;
+        }
+
+        $ok = $this->db->insert('user_fcm_tokens', [
+            'user_id'     => $user_id,
+            'fcm_token'   => $fcm_token,
+            'device_type' => $device_type,
+            'device_name' => $device_name,
+            'is_active'   => 1,
+            'created_at'  => $now,
+            'updated_at'  => $now,
+        ]);
+
+        if (!$ok) {
+            http_response_code(500);
+            echo json_encode([
+                'status'  => FALSE,
+                'message' => 'Failed to save FCM token',
+            ]);
+            return;
+        }
+
+        echo json_encode([
+            'status'  => TRUE,
+            'message' => 'FCM token saved',
+            'data'    => [
+                'id'      => (int)$this->db->insert_id(),
+                'user_id' => $user_id,
+            ],
+        ]);
+    }
+
+    private function _get_firebase_access_token()
+    {
+        $serviceAccountPath = APPPATH . 'third_party/firebase/service-account.json';
+
+        if (!file_exists($serviceAccountPath)) {
+            throw new Exception('Firebase service account file not found: ' . $serviceAccountPath);
+        }
+
+        $autoload = FCPATH . 'vendor/autoload.php';
+
+        if (!file_exists($autoload)) {
+            $autoload = APPPATH . '../vendor/autoload.php';
+        }
+
+        if (!file_exists($autoload)) {
+            throw new Exception('Composer autoload not found. Run composer require google/auth');
+        }
+
+        require_once $autoload;
+
+        $credentials = new Google\Auth\Credentials\ServiceAccountCredentials(
+            ['https://www.googleapis.com/auth/firebase.messaging'],
+            $serviceAccountPath
+        );
+
+        $token = $credentials->fetchAuthToken();
+
+        if (!isset($token['access_token'])) {
+            throw new Exception('Failed to get Firebase access token');
+        }
+
+        return $token['access_token'];
+    }
+
+    private function _get_firebase_project_id()
+    {
+        $serviceAccountPath = APPPATH . 'third_party/firebase/service-account.json';
+
+        if (!file_exists($serviceAccountPath)) {
+            throw new Exception('Firebase service account file not found');
+        }
+
+        $json = json_decode(file_get_contents($serviceAccountPath), true);
+
+        if (!isset($json['project_id']) || empty($json['project_id'])) {
+            throw new Exception('Firebase project_id not found in service account');
+        }
+
+        return $json['project_id'];
+    }
+
+    private function _send_fcm_to_token($token, $title, $body, $data = [])
+    {
+        $accessToken = $this->_get_firebase_access_token();
+        $projectId   = $this->_get_firebase_project_id();
+
+        $url = 'https://fcm.googleapis.com/v1/projects/' . $projectId . '/messages:send';
+
+        // FCM data wajib string semua
+        $cleanData = [];
+        foreach ($data as $key => $value) {
+            $cleanData[$key] = (string) $value;
+        }
+
+        $payload = [
+            'message' => [
+                'token' => $token,
+                'notification' => [
+                    'title' => $title,
+                    'body'  => $body,
+                ],
+                'data' => $cleanData,
+                'android' => [
+                    'priority' => 'HIGH',
+                    'notification' => [
+                        'sound'      => 'default',
+                        'channel_id' => 'mks_default_channel',
+                    ],
+                ],
+            ],
+        ];
+
+        $ch = curl_init();
+
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => $url,
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HTTPHEADER     => [
+                'Authorization: Bearer ' . $accessToken,
+                'Content-Type: application/json',
+            ],
+            CURLOPT_POSTFIELDS     => json_encode($payload),
+            CURLOPT_TIMEOUT        => 20,
+        ]);
+
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlErr  = curl_error($ch);
+
+        curl_close($ch);
+
+        if ($response === false) {
+            return [
+                'success'   => false,
+                'http_code' => $httpCode,
+                'response'  => $curlErr,
+            ];
+        }
+
+        $decoded = json_decode($response, true);
+
+        return [
+            'success'   => ($httpCode >= 200 && $httpCode < 300),
+            'http_code' => $httpCode,
+            'response'  => $decoded ?: $response,
+        ];
+    }
+
+    /**
+     * Broadcast notification to all active FCM tokens
+     * POST /api/send_broadcast_notification
+     */
+    public function send_broadcast_notification()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'POST') {
+            http_response_code(405);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Method not allowed',
+            ]);
+            return;
+        }
+
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        log_message("DEBUG", '[SEND_BROADCAST_NOTIFICATION] Raw input: ' . print_r($input, true));
+
+        $title  = trim($input['title'] ?? '');
+        $body   = trim($input['body'] ?? '');
+        $type   = trim($input['type'] ?? 'broadcast');
+        $screen = trim($input['screen'] ?? 'home');
+
+        $errors = [];
+
+        if ($title === '') {
+            $errors[] = 'Title is required';
+        }
+
+        if ($body === '') {
+            $errors[] = 'Body is required';
+        }
+
+        if (!empty($errors)) {
+            http_response_code(400);
+            echo json_encode([
+                'status'  => false,
+                'message' => implode(', ', $errors),
+                'errors'  => $errors,
+            ]);
+            return;
+        }
+
+        $data = [
+            'type'   => $type,
+            'screen' => $screen,
+        ];
+
+        if (!empty($input['league_id'])) {
+            $data['league_id'] = (string) $input['league_id'];
+        }
+
+        if (!empty($input['match_id'])) {
+            $data['match_id'] = (string) $input['match_id'];
+        }
+
+        if (!empty($input['week_number'])) {
+            $data['week_number'] = (string) $input['week_number'];
+        }
+
+        $tokens = $this->db
+            ->select('id, user_id, fcm_token')
+            ->from('user_fcm_tokens')
+            ->where('is_active', 1)
+            ->get()
+            ->result();
+
+        if (empty($tokens)) {
+            echo json_encode([
+                'status'  => false,
+                'message' => 'No active FCM tokens found',
+            ]);
+            return;
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Insert master notification
+    |--------------------------------------------------------------------------
+    */
+        $this->db->insert('notifications', [
+            'title'          => $title,
+            'body'           => $body,
+            'type'           => $type,
+            'target_type'    => $input['target_type'] ?? 'all',
+            'target_user_id' => !empty($input['target_user_id']) ? (int) $input['target_user_id'] : null,
+            'league_id'      => !empty($input['league_id']) ? (int) $input['league_id'] : null,
+            'match_id'       => !empty($input['match_id']) ? (int) $input['match_id'] : null,
+            'image_url'      => $input['image_url'] ?? null,
+            'data_json'      => json_encode($data),
+            'status'         => 'sent',
+            'scheduled_at'   => null,
+            'sent_at'        => date('Y-m-d H:i:s'),
+            'created_by'     => !empty($input['created_by']) ? (int) $input['created_by'] : null,
+            'created_at'     => date('Y-m-d H:i:s'),
+        ]);
+
+        $notificationId = (int) $this->db->insert_id();
+
+        if ($notificationId > 0) {
+            $data['notification_id'] = (string) $notificationId;
+
+            $this->db->where('id', $notificationId);
+            $this->db->update('notifications', [
+                'data_json' => json_encode($data),
+            ]);
+        }
+
+        $success = 0;
+        $failed  = 0;
+        $results = [];
+
+        foreach ($tokens as $row) {
+            $result = $this->_send_fcm_to_token(
+                $row->fcm_token,
+                $title,
+                $body,
+                $data
+            );
+
+            if ($result['success']) {
+                $success++;
+            } else {
+                $failed++;
+
+                $responseText = json_encode($result['response']);
+
+                if (
+                    strpos($responseText, 'UNREGISTERED') !== false ||
+                    strpos($responseText, 'not a valid FCM registration token') !== false ||
+                    strpos($responseText, 'INVALID_ARGUMENT') !== false
+                ) {
+                    $this->db->where('id', $row->id);
+                    $this->db->update('user_fcm_tokens', [
+                        'is_active'  => 0,
+                        'updated_at' => date('Y-m-d H:i:s'),
+                    ]);
+                }
+            }
+
+            /*
+        |--------------------------------------------------------------------------
+        | Insert user notification log
+        |--------------------------------------------------------------------------
+        */
+            if ($notificationId > 0) {
+                $this->db->insert('notification_user_logs', [
+                    'notification_id' => $notificationId,
+                    'user_id'         => (int) $row->user_id,
+                    'fcm_token'       => $row->fcm_token,
+                    'status'          => $result['success'] ? 'sent' : 'failed',
+                    'response'        => json_encode($result['response']),
+                    'sent_at'         => date('Y-m-d H:i:s'),
+                    'read_at'         => null,
+                    'created_at'      => date('Y-m-d H:i:s'),
+                ]);
+            }
+
+            $results[] = [
+                'token_id'  => (int) $row->id,
+                'user_id'   => (int) $row->user_id,
+                'success'   => $result['success'],
+                'http_code' => $result['http_code'],
+                'response'  => $result['response'],
+            ];
+        }
+
+        echo json_encode([
+            'status'  => true,
+            'message' => 'Broadcast processed',
+            'summary' => [
+                'notification_id' => $notificationId,
+                'total'           => count($tokens),
+                'success'         => $success,
+                'failed'          => $failed,
+            ],
+            'data' => $results,
+        ]);
+    }
+
+    /**
+     * Get notification list for user
+     * GET /api/notifications?user_id=8&limit=30
+     */
+    public function notifications()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'GET') {
+            http_response_code(405);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Method not allowed',
+            ]);
+            return;
+        }
+
+        $userId = (int) $this->input->get('user_id');
+        $limit  = (int) $this->input->get('limit');
+
+        if ($userId <= 0) {
+            http_response_code(400);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'user_id is required',
+            ]);
+            return;
+        }
+
+        if ($limit <= 0) {
+            $limit = 30;
+        }
+
+        if ($limit > 100) {
+            $limit = 100;
+        }
+
+        $rows = $this->db
+            ->select('
+            n.id,
+            n.title,
+            n.body,
+            n.type,
+            n.target_type,
+            n.target_user_id,
+            n.league_id,
+            n.match_id,
+            n.image_url,
+            n.data_json,
+            n.status,
+            n.sent_at,
+            n.created_at,
+            l.id AS log_id,
+            l.status AS user_status,
+            l.read_at
+        ')
+            ->from('notification_user_logs l')
+            ->join('notifications n', 'n.id = l.notification_id', 'inner')
+            ->where('l.user_id', $userId)
+            ->order_by('l.id', 'DESC')
+            ->limit($limit)
+            ->get()
+            ->result();
+
+        $data = [];
+
+        foreach ($rows as $row) {
+            $payload = [];
+
+            if (!empty($row->data_json)) {
+                $decoded = json_decode($row->data_json, true);
+                if (is_array($decoded)) {
+                    $payload = $decoded;
+                }
+            }
+
+            $data[] = [
+                'id'          => (int) $row->id,
+                'log_id'      => (int) $row->log_id,
+                'title'       => $row->title,
+                'body'        => $row->body,
+                'type'        => $row->type,
+                'screen'      => $payload['screen'] ?? 'home',
+                'target_type' => $row->target_type,
+                'league_id'   => $row->league_id !== null ? (int) $row->league_id : null,
+                'match_id'    => $row->match_id !== null ? (int) $row->match_id : null,
+                'image_url'   => $row->image_url,
+                'payload'     => $payload,
+                'status'      => $row->user_status,
+                'is_read'     => !empty($row->read_at),
+                'read_at'     => $row->read_at,
+                'sent_at'     => $row->sent_at,
+                'created_at'  => $row->created_at,
+            ];
+        }
+
+        echo json_encode([
+            'status'  => true,
+            'message' => 'Notifications loaded',
+            'data'    => $data,
+        ]);
+    }
+
+    /**
+     * Mark notification as read
+     * POST /api/notification_mark_read
+     *
+     * Body:
+     * {
+     *   "user_id": 8,
+     *   "log_id": 1
+     * }
+     */
+    public function notification_mark_read()
+    {
+        header('Content-Type: application/json');
+
+        if ($this->input->server('REQUEST_METHOD') !== 'POST') {
+            http_response_code(405);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Method not allowed',
+            ]);
+            return;
+        }
+
+        $input = json_decode($this->input->raw_input_stream, true) ?: [];
+
+        $userId = (int) ($input['user_id'] ?? 0);
+        $logId  = (int) ($input['log_id'] ?? 0);
+
+        if ($userId <= 0 || $logId <= 0) {
+            http_response_code(400);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'user_id and log_id are required',
+            ]);
+            return;
+        }
+
+        $exists = $this->db
+            ->select('id')
+            ->from('notification_user_logs')
+            ->where('id', $logId)
+            ->where('user_id', $userId)
+            ->get()
+            ->row();
+
+        if (!$exists) {
+            http_response_code(404);
+            echo json_encode([
+                'status'  => false,
+                'message' => 'Notification log not found',
+            ]);
+            return;
+        }
+
+        $this->db
+            ->where('id', $logId)
+            ->where('user_id', $userId)
+            ->update('notification_user_logs', [
+                'read_at' => date('Y-m-d H:i:s'),
+            ]);
+
+        echo json_encode([
+            'status'  => true,
+            'message' => 'Notification marked as read',
+        ]);
     }
 }
